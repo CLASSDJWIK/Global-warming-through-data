@@ -1,0 +1,241 @@
+---
+title: "A Climate Garden in Spiral"
+subtitle: "Global warming through data — NASA GISTEMP"
+author: "Advanced Data Science"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    theme: flatly
+    code_folding: show
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 9, dpi = 150)
+```
+
+# 1. The idea
+
+I wanted to present the temperature data in a more natural and vivid way. Rather than drawing another line on the timeline, I imagined each month as a small flower. These flowers form a spiral together, with the oldest observations near the center and the most recent ones placed on the outer edge.
+
+The colors tell the story of the climate. Blue flowers indicate months when temperatures were below the historical norm; yellow and orange flowers indicate a gradual trend toward higher temperatures; while red flowers represent the months with the greatest deviations. The flowers are a metaphor: they do not represent actual plants, seasons, or local weather.
+
+
+# 2. Load NASA GISTEMP
+
+```{r data}
+# Run once if necessary:
+# install.packages(c("ggplot2", "dplyr", "tidyr", "readr", "scales", "tibble", "knitr"))
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(scales)
+library(tibble)
+
+url <- "https://data.giss.nasa.gov/gistemp/tabledata_v4/GLB.Ts+dSST.csv"
+file <- "GLB.Ts+dSST.csv"
+if (!file.exists(file)) {
+  download.file(url, file, mode = "wb", quiet = TRUE)
+}
+
+raw <- readr::read_csv(file, skip = 1,
+                      na = c("***", "****", "", "NA"),
+                      show_col_types = FALSE)
+names(raw) <- trimws(names(raw))
+
+if (!all(c("Year", month.abb) %in% names(raw))) {
+  stop("NASA CSV format unexpected: Year / monthly columns not found. Check the downloaded file.")
+}
+
+monthly <- raw |>
+  dplyr::select(Year, dplyr::all_of(month.abb)) |>
+  dplyr::mutate(
+    Year = suppressWarnings(as.integer(Year)),
+    dplyr::across(dplyr::all_of(month.abb), ~ suppressWarnings(as.numeric(.x)))
+  ) |>
+  tidyr::pivot_longer(cols = dplyr::all_of(month.abb),
+                      names_to = "month", values_to = "anomaly") |>
+  dplyr::mutate(month_id = match(month, month.abb)) |>
+  dplyr::filter(!is.na(Year), is.finite(anomaly), !is.na(month_id)) |>
+  dplyr::group_by(Year) |>
+  dplyr::filter(dplyr::n_distinct(month_id) == 12L) |>
+  dplyr::ungroup() |>
+  dplyr::arrange(Year, month_id) |>
+  dplyr::mutate(index = dplyr::row_number())
+
+stopifnot(nrow(monthly) > 1000L, all(is.finite(monthly$anomaly)),
+          all(table(monthly$Year) == 12L))
+
+#cat("Monthly observations:", nrow(monthly), "\n")
+#cat("Years:", min(monthly$Year), "to", max(monthly$Year), "\n")
+#cat("Observed anomaly range:", paste(round(range(monthly$anomaly), 2), collapse = " to "), "°C\n")
+```
+
+# 3. From anomalies to flowers
+
+NASA GISTEMP reports global temperature **anomalies**: differences relative to the 1951–1980 average, rather than absolute temperatures. I convert these values into four types of flowers. These are my own categories and do not correspond to any official NASA classification system.
+
+| Monthly anomaly | Flower | Visual meaning |
+|:---|:---|:---|
+| Below 0 °C | Ice-blue flower, six pointed petals | Cooler than the 1951–1980 reference average |
+| 0 to +0.3 °C | Yellow flower, seven petals | Near or slightly above the reference average |
+| Above +0.3 to +0.8 °C | Autumn-orange flower, eight petals | Moderately warmer than the reference average |
+| Above +0.8 °C | Red flower, ten petals | Strongly warmer than the reference average |
+
+I also scale flower size by the **absolute anomaly**, using the same size rule for positive and negative values. A large blue flower therefore means a strongly negative anomaly, while a large red flower means a strongly positive anomaly. The thresholds define an artistic encoding, not official NASA categories.
+
+
+
+```{r encoding}
+colors <- c(
+  "Ice (< 0 °C)" = "#79BCE8",
+  "Gold (0–0.3 °C)" = "#E6C451",
+  "Autumn (0.3–0.8 °C)" = "#D99047",
+  "Red (> 0.8 °C)" = "#C94740"
+)
+
+monthly <- monthly |>
+  dplyr::mutate(
+    type = dplyr::case_when(
+      anomaly < 0 ~ "Ice (< 0 °C)",
+      anomaly <= 0.3 ~ "Gold (0–0.3 °C)",
+      anomaly <= 0.8 ~ "Autumn (0.3–0.8 °C)",
+      TRUE ~ "Red (> 0.8 °C)"
+    ),
+    type = factor(type, levels = names(colors)),
+    n_petals = dplyr::case_when(
+      anomaly < 0 ~ 6L,
+      anomaly <= 0.3 ~ 7L,
+      anomaly <= 0.8 ~ 8L,
+      TRUE ~ 10L
+    )
+  )
+
+knitr::kable(
+  monthly |>
+    dplyr::count(type, name = "months"),
+  caption = "Number of monthly observations per botanical category"
+)
+```
+
+# 4. Arranging the flowers
+
+
+The spiral follows the chronological order of the NASA observations, one month after another. Older months are placed near the centre; recent months appear further outward. A square-root radius keeps the composition compact, while a constant angular step creates the repeating spiral arms.
+
+The angle and distance are part of the artistic layout, not temperature measurements or geographical coordinates. **The data determine the colour, size and petal count of every flower.**
+
+```{r spiral-data}
+# This angle reproduces the multi-arm look of the original Climate Petal Spiral.
+angle_step <- 0.38
+spiral_factor <- 0.113
+
+# Cap the visual radius mapping so a few extreme months cannot dominate.
+size_domain <- max(abs(monthly$anomaly))
+
+flowers <- monthly |>
+  dplyr::mutate(
+    theta = index * angle_step,
+    spiral_radius = spiral_factor * sqrt(index),
+    cx = spiral_radius * cos(theta),
+    cy = spiral_radius * sin(theta),
+    flower_radius = 0.057 + 0.033 * (abs(anomaly) / size_domain),
+    # This produces pointed ice crystals and smoother red blossoms.
+    petal_depth = ifelse(anomaly < 0, 0.42, 0.28)
+  )
+
+# Each month generates its own CLOSED, reproducible flower contour.
+# R base lapply avoids the data-masking errors encountered in earlier versions.
+make_flower <- function(i) {
+  d <- flowers[i, , drop = FALSE]
+  t <- seq(0, 2 * pi, length.out = 65)
+  amplitude <- d$petal_depth
+  petal_shape <- 1 + amplitude * cos(d$n_petals * t)
+  radius <- d$flower_radius * petal_shape
+  data.frame(
+    id = rep(d$index, length(t)),
+    type = rep(as.character(d$type), length(t)),
+    x = d$cx + radius * cos(t),
+    y = d$cy + radius * sin(t)
+  )
+}
+
+petals <- dplyr::bind_rows(lapply(seq_len(nrow(flowers)), make_flower))
+stopifnot(nrow(petals) == nrow(flowers) * 65L,
+          all(is.finite(petals$x)), all(is.finite(petals$y)))
+```
+
+# 5. A Climate Garden in Spiral
+
+
+Every small flower represents a real monthly NASA global temperature anomaly. No flower is manually placed or recoloured: the arrangement and visual attributes are generated entirely in R.
+
+
+```{r create-artwork}
+max_extent <- max(sqrt(flowers$cx^2 + flowers$cy^2) + flowers$flower_radius)
+lim <- max_extent + 0.22
+
+p_art <- ggplot() +
+  geom_polygon(
+    data = petals,
+    aes(x, y, group = id, fill = type),
+    alpha = 0.77,
+    colour = NA
+  ) +
+  geom_path(
+    data = petals,
+    aes(x, y, group = id, colour = type),
+    linewidth = 0.13,
+    alpha = 0.75,
+    lineend = "round"
+  ) +
+  geom_point(
+    data = flowers,
+    aes(cx, cy, colour = type),
+    size = 0.13,
+    alpha = 0.8
+  ) +
+  scale_fill_manual(values = colors, guide = "none") +
+  scale_colour_manual(values = colors, guide = "none") +
+  coord_fixed(xlim = c(-lim, lim), ylim = c(-lim, lim),
+              expand = FALSE) +
+  theme_void() +
+  theme(
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+```
+
+```{r export-artwork}
+dir.create("nasa_climate_petal_spiral", recursive = TRUE, showWarnings = FALSE)
+
+png_path <- "nasa_climate_petal_spiral/A_Climate_Garden_in_Spiral.png"
+
+ggsave(
+  filename = png_path,
+  plot = p_art,
+  width = 10,
+  height = 10,
+  units = "in",
+  dpi = 300,
+  bg = "white",
+  limitsize = TRUE
+)
+
+# The exported PNG contains only the square artwork on a white background.
+knitr::include_graphics(png_path)
+```
+
+# 6. Reading the garden
+
+
+Start in the middle and work your way outward: that’s how time passes. Each flower represents a month. The color of the flower and the number of petals indicate the category of deviation, while the size shows how much that month deviated from the average for the 1951–1980 period.
+
+The outward spread of orange and red flowers makes the increasing frequency of strongly positive anomalies visible. The piece is not intended to give exact numerical readings for individual months or to depict regional temperatures. Those details remain available in the source dataset and the code.
+
